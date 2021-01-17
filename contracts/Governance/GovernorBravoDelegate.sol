@@ -153,40 +153,68 @@ contract GovernorBravoDelegate is GovernorBravoDelegateStorageV1, GovernorBravoE
       * @param support The support value for the vote. 0=against, 1=for, 2=abstain
       * @param reason A string giving a reason for the user's vote. If not needed, should be an empty string.
       */
-    function castVote(uint proposalId, uint8 support, string calldata reason) external {
-        return _castVote(msg.sender, proposalId, support, reason);
+    function castVote(uint proposalId, uint8 support, string calldata reason, uint96 amount) external {
+        return _castVote(msg.sender, proposalId, support, reason, amount);
     }
 
-    function castVoteBySig(uint proposalId, uint8 support, uint8 v, bytes32 r, bytes32 s) external {
+    function castAllVotes(uint proposalId, uint8 support, string calldata reason) external {
+        Proposal storage proposal = proposals[proposalId];
+        Receipt memory receipt = proposal.receipts[msg.sender];
+        uint96 votes = comp.getPriorVotes(msg.sender, proposal.startBlock);
+        uint96 amount = uint96(sub256(votes, receipt.votes));
+
+        return _castVote(msg.sender, proposalId, support, reason, amount);
+    }
+
+    function castVoteBySig(uint proposalId, uint8 support, uint96 amount, uint8 v, bytes32 r, bytes32 s) external {
         bytes32 domainSeparator = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes(name)), getChainId(), address(this)));
         bytes32 structHash = keccak256(abi.encode(BALLOT_TYPEHASH, proposalId, support));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
         address signatory = ecrecover(digest, v, r, s);
         require(signatory != address(0), "GovernorBravo::castVoteBySig: invalid signature");
-        return _castVote(signatory, proposalId, support, "");
+        return _castVote(signatory, proposalId, support, "", amount);
     }
 
-    function _castVote(address voter, uint proposalId, uint8 support, string memory reason) internal {
+    function castAllVotesBySig(uint proposalId, uint8 support, uint8 v, bytes32 r, bytes32 s) external {
+        bytes32 domainSeparator = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes(name)), getChainId(), address(this)));
+        bytes32 structHash = keccak256(abi.encode(BALLOT_TYPEHASH, proposalId, support));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+        address signatory = ecrecover(digest, v, r, s);
+        require(signatory != address(0), "GovernorBravo::castVoteBySig: invalid signature");
+
+        Proposal storage proposal = proposals[proposalId];
+        Receipt memory receipt = proposal.receipts[signatory];
+        uint96 votes = comp.getPriorVotes(signatory, proposal.startBlock);
+        uint96 amount = uint96(sub256(votes, receipt.votes));
+
+        return _castVote(signatory, proposalId, support, "", amount);
+    }
+
+    function _castVote(address voter, uint proposalId, uint8 support, string memory reason, uint96 amount) internal {
         require(state(proposalId) == ProposalState.Active, "GovernorBravo::_castVote: voting is closed");
         require(support <= 2, "GovernorBravo::_castVote: invalid vote type");
         Proposal storage proposal = proposals[proposalId];
         Receipt storage receipt = proposal.receipts[voter];
         require(receipt.hasVoted == false, "GovernorBravo::_castVote: voter already voted");
         uint96 votes = comp.getPriorVotes(voter, proposal.startBlock);
+        require(uint96(add256(receipt.votes, uint256(amount))) <= votes, "GovernorBravo::_castVote: voter casting more votes than available");
 
         if (support == 0) {
-            proposal.againstVotes = add256(proposal.againstVotes, votes);
+            proposal.againstVotes = add256(proposal.againstVotes, amount);
         } else if (support == 1) {
-            proposal.forVotes = add256(proposal.forVotes, votes);
+            proposal.forVotes = add256(proposal.forVotes, amount);
         } else if (support == 2) {
-            proposal.abstainVotes = add256(proposal.abstainVotes, votes);
+            proposal.abstainVotes = add256(proposal.abstainVotes, amount);
         }
 
-        receipt.hasVoted = true;
-        receipt.support = support;
-        receipt.votes = votes;
+        if (uint96(add256(receipt.votes, uint256(amount))) == votes) {
+            receipt.hasVoted = true;
+        }
 
-        if(bytes(reason).length != 0) {
+        receipt.support = support;
+        receipt.votes = uint96(add256(receipt.votes, amount));
+
+        if (bytes(reason).length != 0) {
             receipt.reason = reason;
         }
 
